@@ -1,608 +1,527 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
-import * as THREE from 'three'
 import { Button } from './ui/button'
-import { Pause } from 'lucide-react'
+import { Card } from './ui/card'
 
-interface GameCanvasProps {
-  level: number
-  onComplete: (score: number, time: number) => void
-  onPause: () => void
+interface GameObject {
+  x: number
+  y: number
+  width: number
+  height: number
+  vx?: number
+  vy?: number
+  type: string
+  health?: number
 }
 
-interface Obstacle {
-  mesh: THREE.Mesh
-  type: 'scissors' | 'stapler' | 'eraser' | 'ruler' | 'sharpener'
-  position: THREE.Vector3
-  rotation: THREE.Vector3
-  dangerous: boolean
+interface Level {
+  id: number
+  name: string
+  background: string
+  obstacles: GameObject[]
+  enemies: GameObject[]
+  boss?: GameObject
+  scrollSpeed: number
+  difficulty: number
 }
 
-const GameCanvas: React.FC<GameCanvasProps> = ({ level, onComplete, onPause }) => {
-  const mountRef = useRef<HTMLDivElement>(null)
-  const sceneRef = useRef<THREE.Scene>()
-  const rendererRef = useRef<THREE.WebGLRenderer>()
-  const cameraRef = useRef<THREE.PerspectiveCamera>()
-  const pencilRef = useRef<THREE.Group>()
-  const animationIdRef = useRef<number>()
-  
-  const [gameTime, setGameTime] = useState(0)
+const LEVELS: Level[] = [
+  {
+    id: 1,
+    name: "Desk Escape",
+    background: "#8B4513",
+    obstacles: [
+      { x: 300, y: 350, width: 40, height: 40, type: "eraser" },
+      { x: 500, y: 320, width: 60, height: 20, type: "ruler" },
+      { x: 700, y: 340, width: 50, height: 50, type: "scissors" },
+    ],
+    enemies: [],
+    scrollSpeed: 2,
+    difficulty: 1
+  },
+  {
+    id: 2,
+    name: "Notebook Valley",
+    background: "#4A5568",
+    obstacles: [
+      { x: 250, y: 330, width: 40, height: 40, type: "eraser" },
+      { x: 400, y: 310, width: 60, height: 20, type: "ruler" },
+      { x: 550, y: 340, width: 50, height: 50, type: "scissors" },
+      { x: 750, y: 320, width: 30, height: 30, type: "stapler" },
+    ],
+    enemies: [
+      { x: 600, y: 300, width: 20, height: 20, vx: -1, type: "paperball" }
+    ],
+    scrollSpeed: 3,
+    difficulty: 2
+  },
+  {
+    id: 3,
+    name: "Pencil Case Chaos",
+    background: "#2D3748",
+    obstacles: [
+      { x: 200, y: 340, width: 40, height: 40, type: "eraser" },
+      { x: 350, y: 300, width: 60, height: 20, type: "ruler" },
+      { x: 500, y: 330, width: 50, height: 50, type: "scissors" },
+      { x: 650, y: 310, width: 30, height: 30, type: "stapler" },
+      { x: 800, y: 340, width: 35, height: 35, type: "sharpener" },
+    ],
+    enemies: [
+      { x: 450, y: 280, width: 20, height: 20, vx: -1.5, type: "paperball" },
+      { x: 700, y: 290, width: 20, height: 20, vx: -1, type: "paperball" }
+    ],
+    scrollSpeed: 4,
+    difficulty: 3
+  },
+  {
+    id: 4,
+    name: "Teacher's Wrath",
+    background: "#1A202C",
+    obstacles: [
+      { x: 300, y: 330, width: 50, height: 50, type: "scissors" },
+      { x: 500, y: 320, width: 30, height: 30, type: "stapler" },
+    ],
+    enemies: [
+      { x: 400, y: 270, width: 20, height: 20, vx: -2, type: "paperball" },
+      { x: 600, y: 285, width: 20, height: 20, vx: -1.5, type: "paperball" }
+    ],
+    boss: { x: 700, y: 200, width: 80, height: 120, health: 5, type: "teacher" },
+    scrollSpeed: 5,
+    difficulty: 4
+  }
+]
+
+export default function GameCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [gameState, setGameState] = useState<'menu' | 'playing' | 'paused' | 'gameOver' | 'levelComplete' | 'victory'>('menu')
+  const [currentLevel, setCurrentLevel] = useState(0)
   const [score, setScore] = useState(0)
-  const [isJumping, setIsJumping] = useState(false)
-  const [gameStarted, setGameStarted] = useState(false)
-  
-  // Game state
-  const gameStateRef = useRef({
-    pencilPosition: new THREE.Vector3(0, 0.5, 0),
-    pencilVelocity: new THREE.Vector3(0, 0, 0),
-    isGrounded: true,
-    obstacles: [] as Obstacle[],
-    startTime: Date.now(),
-    isGameActive: true
-  })
+  const [lives, setLives] = useState(3)
+  const [player, setPlayer] = useState({ x: 100, y: 350, width: 30, height: 8, vy: 0, onGround: true })
+  const [camera, setCamera] = useState({ x: 0 })
+  const [levelObjects, setLevelObjects] = useState<GameObject[]>([])
+  const [homeworkProjectiles, setHomeworkProjectiles] = useState<GameObject[]>([])
+  const [keys, setKeys] = useState({ left: false, right: false, up: false, down: false })
 
-  // Input handling
-  const keysRef = useRef({
-    w: false, a: false, s: false, d: false,
-    ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false,
-    space: false
-  })
+  const level = LEVELS[currentLevel]
 
-  const handleKeyDown = useCallback((event: KeyboardEvent) => {
-    const key = event.code === 'Space' ? 'space' : event.key.toLowerCase()
-    if (key in keysRef.current) {
-      keysRef.current[key as keyof typeof keysRef.current] = true
-      event.preventDefault()
-    }
-  }, [])
-
-  const handleKeyUp = useCallback((event: KeyboardEvent) => {
-    const key = event.code === 'Space' ? 'space' : event.key.toLowerCase()
-    if (key in keysRef.current) {
-      keysRef.current[key as keyof typeof keysRef.current] = false
-      event.preventDefault()
-    }
-  }, [])
-
-  // Helper functions for creating 3D objects
-  const createTileTexture = useCallback(() => {
-    const canvas = document.createElement('canvas')
-    canvas.width = 256
-    canvas.height = 256
-    const ctx = canvas.getContext('2d')!
-    
-    // Create tile pattern
-    ctx.fillStyle = '#F5F5DC'
-    ctx.fillRect(0, 0, 256, 256)
-    ctx.strokeStyle = '#E0E0E0'
-    ctx.lineWidth = 2
-    ctx.strokeRect(0, 0, 256, 256)
-    
-    const texture = new THREE.CanvasTexture(canvas)
-    texture.wrapS = THREE.RepeatWrapping
-    texture.wrapT = THREE.RepeatWrapping
-    texture.repeat.set(10, 15)
-    return texture
-  }, [])
-
-  const createPencil = useCallback(() => {
-    const pencilGroup = new THREE.Group()
-    
-    // Pencil body (yellow wood)
-    const bodyGeometry = new THREE.CylinderGeometry(0.05, 0.05, 1.5, 8)
-    const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xFFD700 })
-    const body = new THREE.Mesh(bodyGeometry, bodyMaterial)
-    body.position.y = 0.75
-    pencilGroup.add(body)
-    
-    // Pencil tip (graphite)
-    const tipGeometry = new THREE.ConeGeometry(0.05, 0.2, 8)
-    const tipMaterial = new THREE.MeshLambertMaterial({ color: 0x2C2C2C })
-    const tip = new THREE.Mesh(tipGeometry, tipMaterial)
-    tip.position.y = 1.6
-    pencilGroup.add(tip)
-    
-    // Eraser (pink)
-    const eraserGeometry = new THREE.CylinderGeometry(0.06, 0.06, 0.15, 8)
-    const eraserMaterial = new THREE.MeshLambertMaterial({ color: 0xFF69B4 })
-    const eraser = new THREE.Mesh(eraserGeometry, eraserMaterial)
-    eraser.position.y = -0.075
-    pencilGroup.add(eraser)
-    
-    // Metal ferrule
-    const ferruleGeometry = new THREE.CylinderGeometry(0.055, 0.055, 0.1, 8)
-    const ferruleMaterial = new THREE.MeshLambertMaterial({ color: 0xC0C0C0 })
-    const ferrule = new THREE.Mesh(ferruleGeometry, ferruleMaterial)
-    ferrule.position.y = 0.05
-    pencilGroup.add(ferrule)
-    
-    return pencilGroup
-  }, [])
-
-  const createWalls = useCallback((scene: THREE.Scene) => {
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: 0xF0F8FF })
-    
-    // Back wall
-    const backWallGeometry = new THREE.PlaneGeometry(20, 8)
-    const backWall = new THREE.Mesh(backWallGeometry, wallMaterial)
-    backWall.position.set(0, 4, -15)
-    scene.add(backWall)
-    
-    // Side walls
-    const sideWallGeometry = new THREE.PlaneGeometry(30, 8)
-    const leftWall = new THREE.Mesh(sideWallGeometry, wallMaterial)
-    leftWall.position.set(-10, 4, 0)
-    leftWall.rotation.y = Math.PI / 2
-    scene.add(leftWall)
-    
-    const rightWall = new THREE.Mesh(sideWallGeometry, wallMaterial)
-    rightWall.position.set(10, 4, 0)
-    rightWall.rotation.y = -Math.PI / 2
-    scene.add(rightWall)
-  }, [])
-
-  const createDesk = useCallback(() => {
-    const deskGroup = new THREE.Group()
-    
-    // Desktop
-    const desktopGeometry = new THREE.BoxGeometry(2, 0.1, 1.2)
-    const desktopMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 })
-    const desktop = new THREE.Mesh(desktopGeometry, desktopMaterial)
-    desktop.position.y = 1.5
-    deskGroup.add(desktop)
-    
-    // Legs
-    const legGeometry = new THREE.BoxGeometry(0.1, 1.5, 0.1)
-    const legMaterial = new THREE.MeshLambertMaterial({ color: 0x696969 })
-    
-    const positions = [
-      [-0.9, 0.75, -0.5], [0.9, 0.75, -0.5],
-      [-0.9, 0.75, 0.5], [0.9, 0.75, 0.5]
-    ]
-    
-    positions.forEach(pos => {
-      const leg = new THREE.Mesh(legGeometry, legMaterial)
-      leg.position.set(pos[0], pos[1], pos[2])
-      deskGroup.add(leg)
-    })
-    
-    return deskGroup
-  }, [])
-
-  const createTeacherDesk = useCallback(() => {
-    const deskGroup = new THREE.Group()
-    
-    const desktopGeometry = new THREE.BoxGeometry(3, 0.15, 1.5)
-    const desktopMaterial = new THREE.MeshLambertMaterial({ color: 0x654321 })
-    const desktop = new THREE.Mesh(desktopGeometry, desktopMaterial)
-    desktop.position.y = 1.5
-    deskGroup.add(desktop)
-    
-    return deskGroup
-  }, [])
-
-  const createClassroomFurniture = useCallback((scene: THREE.Scene) => {
-    // Create desks
-    for (let i = 0; i < 6; i++) {
-      const desk = createDesk()
-      desk.position.set(
-        (i % 3 - 1) * 4,
-        0,
-        Math.floor(i / 3) * -6 - 3
-      )
-      scene.add(desk)
-    }
-    
-    // Teacher's desk
-    const teacherDesk = createTeacherDesk()
-    teacherDesk.position.set(0, 0, -12)
-    scene.add(teacherDesk)
-  }, [createDesk, createTeacherDesk])
-
-  const createExitDoor = useCallback((scene: THREE.Scene) => {
-    // Door frame
-    const frameGeometry = new THREE.BoxGeometry(2.2, 4, 0.2)
-    const frameMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 })
-    const frame = new THREE.Mesh(frameGeometry, frameMaterial)
-    frame.position.set(0, 2, 14.9)
-    scene.add(frame)
-    
-    // Door
-    const doorGeometry = new THREE.BoxGeometry(2, 3.8, 0.1)
-    const doorMaterial = new THREE.MeshLambertMaterial({ color: 0x654321 })
-    const door = new THREE.Mesh(doorGeometry, doorMaterial)
-    door.position.set(0, 2, 14.8)
-    scene.add(door)
-    
-    // Door handle
-    const handleGeometry = new THREE.SphereGeometry(0.05)
-    const handleMaterial = new THREE.MeshLambertMaterial({ color: 0xFFD700 })
-    const handle = new THREE.Mesh(handleGeometry, handleMaterial)
-    handle.position.set(0.8, 2, 14.7)
-    scene.add(handle)
-  }, [])
-
-  const createClassroom = useCallback((scene: THREE.Scene) => {
-    // Floor
-    const floorGeometry = new THREE.PlaneGeometry(20, 30)
-    const floorMaterial = new THREE.MeshLambertMaterial({ 
-      color: 0xF5F5DC,
-      map: createTileTexture()
-    })
-    const floor = new THREE.Mesh(floorGeometry, floorMaterial)
-    floor.rotation.x = -Math.PI / 2
-    scene.add(floor)
-    
-    // Walls
-    createWalls(scene)
-    
-    // Desks and classroom furniture
-    createClassroomFurniture(scene)
-    
-    // Exit door
-    createExitDoor(scene)
-  }, [createTileTexture, createWalls, createClassroomFurniture, createExitDoor])
-
-  const createScissors = useCallback(() => {
-    const scissorsGroup = new THREE.Group()
-    
-    // Blade 1
-    const bladeGeometry = new THREE.BoxGeometry(0.05, 0.8, 0.02)
-    const bladeMaterial = new THREE.MeshLambertMaterial({ color: 0xC0C0C0 })
-    const blade1 = new THREE.Mesh(bladeGeometry, bladeMaterial)
-    blade1.position.set(-0.1, 0, 0)
-    blade1.rotation.z = 0.2
-    scissorsGroup.add(blade1)
-    
-    const blade2 = new THREE.Mesh(bladeGeometry, bladeMaterial)
-    blade2.position.set(0.1, 0, 0)
-    blade2.rotation.z = -0.2
-    scissorsGroup.add(blade2)
-    
-    // Handle
-    const handleGeometry = new THREE.TorusGeometry(0.15, 0.02, 8, 16)
-    const handleMaterial = new THREE.MeshLambertMaterial({ color: 0xFF4500 })
-    const handle1 = new THREE.Mesh(handleGeometry, handleMaterial)
-    handle1.position.set(-0.1, -0.3, 0)
-    scissorsGroup.add(handle1)
-    
-    const handle2 = new THREE.Mesh(handleGeometry, handleMaterial)
-    handle2.position.set(0.1, -0.3, 0)
-    scissorsGroup.add(handle2)
-    
-    return scissorsGroup
-  }, [])
-
-  const createStapler = useCallback(() => {
-    const staplerGroup = new THREE.Group()
-    
-    // Base
-    const baseGeometry = new THREE.BoxGeometry(0.8, 0.2, 0.4)
-    const baseMaterial = new THREE.MeshLambertMaterial({ color: 0x2F2F2F })
-    const base = new THREE.Mesh(baseGeometry, baseMaterial)
-    staplerGroup.add(base)
-    
-    // Top
-    const topGeometry = new THREE.BoxGeometry(0.7, 0.15, 0.35)
-    const topMaterial = new THREE.MeshLambertMaterial({ color: 0x1F1F1F })
-    const top = new THREE.Mesh(topGeometry, topMaterial)
-    top.position.y = 0.175
-    staplerGroup.add(top)
-    
-    return staplerGroup
-  }, [])
-
-  const createEraser = useCallback(() => {
-    const eraserGeometry = new THREE.BoxGeometry(0.3, 0.1, 0.8)
-    const eraserMaterial = new THREE.MeshLambertMaterial({ color: 0xFF69B4 })
-    return new THREE.Mesh(eraserGeometry, eraserMaterial)
-  }, [])
-
-  const createRuler = useCallback(() => {
-    const rulerGeometry = new THREE.BoxGeometry(2, 0.05, 0.15)
-    const rulerMaterial = new THREE.MeshLambertMaterial({ color: 0xFFFFE0 })
-    return new THREE.Mesh(rulerGeometry, rulerMaterial)
-  }, [])
-
-  const createObstacles = useCallback((scene: THREE.Scene) => {
-    const obstacles: Obstacle[] = []
-    
-    // Scissors (dangerous)
-    const scissors = createScissors()
-    scissors.position.set(2, 0.2, 5)
-    scene.add(scissors)
-    obstacles.push({
-      mesh: scissors,
-      type: 'scissors',
-      position: scissors.position.clone(),
-      rotation: scissors.rotation.clone(),
-      dangerous: true
-    })
-    
-    // Stapler
-    const stapler = createStapler()
-    stapler.position.set(-3, 0.3, 8)
-    scene.add(stapler)
-    obstacles.push({
-      mesh: stapler,
-      type: 'stapler',
-      position: stapler.position.clone(),
-      rotation: stapler.rotation.clone(),
-      dangerous: true
-    })
-    
-    // Erasers (safe to touch)
-    for (let i = 0; i < 3; i++) {
-      const eraser = createEraser()
-      eraser.position.set(
-        (Math.random() - 0.5) * 8,
-        0.1,
-        i * 3 + 2
-      )
-      scene.add(eraser)
-      obstacles.push({
-        mesh: eraser,
-        type: 'eraser',
-        position: eraser.position.clone(),
-        rotation: eraser.rotation.clone(),
-        dangerous: false
-      })
-    }
-    
-    // Rulers
-    for (let i = 0; i < 2; i++) {
-      const ruler = createRuler()
-      ruler.position.set(
-        (i === 0 ? -2 : 2),
-        0.05,
-        i * 4 + 6
-      )
-      scene.add(ruler)
-      obstacles.push({
-        mesh: ruler,
-        type: 'ruler',
-        position: ruler.position.clone(),
-        rotation: ruler.rotation.clone(),
-        dangerous: false
-      })
-    }
-    
-    gameStateRef.current.obstacles = obstacles
-  }, [createScissors, createStapler, createEraser, createRuler])
-
-  const checkCollisions = useCallback(() => {
-    const pencilPos = gameStateRef.current.pencilPosition
-    
-    gameStateRef.current.obstacles.forEach(obstacle => {
-      const distance = pencilPos.distanceTo(obstacle.position)
-      
-      if (distance < 0.5) {
-        if (obstacle.dangerous) {
-          // Hit dangerous obstacle - reset position
-          gameStateRef.current.pencilPosition.set(0, 0.5, 0)
-          gameStateRef.current.pencilVelocity.set(0, 0, 0)
-          setScore(prev => Math.max(0, prev - 10))
-        } else {
-          // Hit safe obstacle - small score boost
-          setScore(prev => prev + 5)
-          // Remove the obstacle
-          sceneRef.current?.remove(obstacle.mesh)
-          gameStateRef.current.obstacles = gameStateRef.current.obstacles.filter(o => o !== obstacle)
-        }
-      }
-    })
-  }, [])
-
-  const completeGame = useCallback(() => {
-    gameStateRef.current.isGameActive = false
-    const finalTime = (Date.now() - gameStateRef.current.startTime) / 1000
-    const finalScore = score + Math.max(0, 100 - Math.floor(finalTime))
-    onComplete(finalScore, finalTime)
-  }, [score, onComplete])
-
-  // Game physics and update loop
-  const updateGame = useCallback(() => {
-    if (!gameStateRef.current.isGameActive || !pencilRef.current) return
-    
-    const gameState = gameStateRef.current
-    const keys = keysRef.current
-    const pencil = pencilRef.current
-    const camera = cameraRef.current!
-    
-    // Movement input
-    const moveSpeed = 0.1
-    const jumpForce = 0.3
-    
-    // Horizontal movement
-    if (keys.w || keys.ArrowUp) {
-      gameState.pencilVelocity.z += moveSpeed
-    }
-    if (keys.s || keys.ArrowDown) {
-      gameState.pencilVelocity.z -= moveSpeed
-    }
-    if (keys.a || keys.ArrowLeft) {
-      gameState.pencilVelocity.x -= moveSpeed
-    }
-    if (keys.d || keys.ArrowRight) {
-      gameState.pencilVelocity.x += moveSpeed
-    }
-    
-    // Jumping
-    if ((keys.space) && gameState.isGrounded) {
-      gameState.pencilVelocity.y = jumpForce
-      gameState.isGrounded = false
-      setIsJumping(true)
-    }
-    
-    // Apply gravity
-    gameState.pencilVelocity.y -= 0.02
-    
-    // Update position
-    gameState.pencilPosition.add(gameState.pencilVelocity)
-    
-    // Ground collision
-    if (gameState.pencilPosition.y <= 0.5) {
-      gameState.pencilPosition.y = 0.5
-      gameState.pencilVelocity.y = 0
-      gameState.isGrounded = true
-      setIsJumping(false)
-    }
-    
-    // Apply friction
-    gameState.pencilVelocity.x *= 0.85
-    gameState.pencilVelocity.z *= 0.85
-    
-    // Boundary constraints
-    gameState.pencilPosition.x = Math.max(-9, Math.min(9, gameState.pencilPosition.x))
-    gameState.pencilPosition.z = Math.max(-14, Math.min(14, gameState.pencilPosition.z))
-    
-    // Update pencil mesh position
-    pencil.position.copy(gameState.pencilPosition)
-    
-    // Pencil rotation based on movement
-    if (gameState.pencilVelocity.length() > 0.01) {
-      const angle = Math.atan2(gameState.pencilVelocity.x, gameState.pencilVelocity.z)
-      pencil.rotation.y = angle
-    }
-    
-    // Camera follow (third-person)
-    const cameraOffset = new THREE.Vector3(0, 3, -4)
-    const desiredCameraPosition = gameState.pencilPosition.clone().add(cameraOffset)
-    camera.position.lerp(desiredCameraPosition, 0.1)
-    camera.lookAt(gameState.pencilPosition)
-    
-    // Check for obstacle collisions
-    checkCollisions()
-    
-    // Check for exit
-    if (gameState.pencilPosition.z > 13) {
-      completeGame()
-    }
-    
-    // Update game time
-    const currentTime = (Date.now() - gameState.startTime) / 1000
-    setGameTime(currentTime)
-  }, [checkCollisions, completeGame])
-
-  // Initialize Three.js scene
+  // Initialize level
   useEffect(() => {
-    if (!mountRef.current) return
-
-    const mount = mountRef.current
-
-    // Scene setup
-    const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x87CEEB)
-    sceneRef.current = scene
-
-    // Camera setup
-    const camera = new THREE.PerspectiveCamera(
-      75,
-      window.innerWidth / window.innerHeight,
-      0.1,
-      1000
-    )
-    camera.position.set(0, 3, -4)
-    cameraRef.current = camera
-
-    // Renderer setup
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setSize(window.innerWidth, window.innerHeight)
-    renderer.shadowMap.enabled = true
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap
-    rendererRef.current = renderer
-    mount.appendChild(renderer.domElement)
-
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
-    scene.add(ambientLight)
-
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-    directionalLight.position.set(10, 10, 5)
-    directionalLight.castShadow = true
-    directionalLight.shadow.mapSize.width = 2048
-    directionalLight.shadow.mapSize.height = 2048
-    scene.add(directionalLight)
-
-    // Create game world
-    createClassroom(scene)
-    createObstacles(scene)
-
-    // Create pencil
-    const pencil = createPencil()
-    pencil.position.set(0, 0.5, 0)
-    scene.add(pencil)
-    pencilRef.current = pencil
-
-    // Start game
-    gameStateRef.current.startTime = Date.now()
-    setGameStarted(true)
-
-    // Animation loop
-    const animate = () => {
-      updateGame()
-      renderer.render(scene, camera)
-      animationIdRef.current = requestAnimationFrame(animate)
+    if (level) {
+      setLevelObjects([...level.obstacles, ...level.enemies, ...(level.boss ? [level.boss] : [])])
+      setHomeworkProjectiles([])
     }
-    animate()
+  }, [currentLevel, level])
 
-    // Event listeners
+  // Keyboard controls
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      switch (e.code) {
+        case 'ArrowLeft':
+          setKeys(prev => ({ ...prev, left: true }))
+          break
+        case 'ArrowRight':
+          setKeys(prev => ({ ...prev, right: true }))
+          break
+        case 'ArrowUp':
+        case 'Space':
+          setKeys(prev => ({ ...prev, up: true }))
+          break
+        case 'ArrowDown':
+          setKeys(prev => ({ ...prev, down: true }))
+          break
+      }
+    }
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      switch (e.code) {
+        case 'ArrowLeft':
+          setKeys(prev => ({ ...prev, left: false }))
+          break
+        case 'ArrowRight':
+          setKeys(prev => ({ ...prev, right: false }))
+          break
+        case 'ArrowUp':
+        case 'Space':
+          setKeys(prev => ({ ...prev, up: false }))
+          break
+        case 'ArrowDown':
+          setKeys(prev => ({ ...prev, down: false }))
+          break
+      }
+    }
+
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('keyup', handleKeyUp)
 
-    // Handle resize
-    const handleResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight
-      camera.updateProjectionMatrix()
-      renderer.setSize(window.innerWidth, window.innerHeight)
-    }
-    window.addEventListener('resize', handleResize)
-
     return () => {
-      if (animationIdRef.current) {
-        cancelAnimationFrame(animationIdRef.current)
-      }
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
-      window.removeEventListener('resize', handleResize)
-      if (mount && renderer.domElement) {
-        mount.removeChild(renderer.domElement)
-      }
-      renderer.dispose()
     }
-  }, [handleKeyDown, handleKeyUp, createClassroom, createObstacles, createPencil, updateGame])
+  }, [])
+
+  // Collision detection
+  const checkCollision = useCallback((rect1: any, rect2: any) => {
+    return rect1.x < rect2.x + rect2.width &&
+           rect1.x + rect1.width > rect2.x &&
+           rect1.y < rect2.y + rect2.height &&
+           rect1.y + rect1.height > rect2.y
+  }, [])
+
+  // Game loop
+  useEffect(() => {
+    if (gameState !== 'playing') return
+
+    const gameLoop = setInterval(() => {
+      // Update player physics
+      setPlayer(prev => {
+        const newPlayer = { ...prev }
+        
+        // Horizontal movement
+        if (keys.left) newPlayer.x -= 4
+        if (keys.right) newPlayer.x += 4
+        
+        // Jumping
+        if (keys.up && newPlayer.onGround) {
+          newPlayer.vy = -12
+          newPlayer.onGround = false
+        }
+        
+        // Gravity
+        newPlayer.vy += 0.8
+        newPlayer.y += newPlayer.vy
+        
+        // Ground collision
+        if (newPlayer.y >= 350) {
+          newPlayer.y = 350
+          newPlayer.vy = 0
+          newPlayer.onGround = true
+        }
+        
+        // Keep player in bounds
+        newPlayer.x = Math.max(0, Math.min(newPlayer.x, 1200))
+        
+        return newPlayer
+      })
+
+      // Update camera to follow player
+      setCamera(prev => ({
+        x: Math.max(0, player.x - 400)
+      }))
+
+      // Move enemies and check collisions
+      setLevelObjects(prev => prev.map(obj => {
+        if (obj.type === 'paperball') {
+          return { ...obj, x: obj.x + (obj.vx || 0) }
+        }
+        return obj
+      }))
+
+      // Boss behavior - teacher shooting homework
+      if (level.boss) {
+        const boss = levelObjects.find(obj => obj.type === 'teacher')
+        if (boss && Math.random() < 0.02) { // 2% chance per frame to shoot
+          setHomeworkProjectiles(prev => [...prev, {
+            x: boss.x,
+            y: boss.y + 60,
+            width: 15,
+            height: 20,
+            vx: -6,
+            type: 'homework'
+          }])
+        }
+      }
+
+      // Update homework projectiles
+      setHomeworkProjectiles(prev => 
+        prev.map(hw => ({ ...hw, x: hw.x + (hw.vx || 0) }))
+           .filter(hw => hw.x > -50) // Remove off-screen projectiles
+      )
+
+      // Check collisions
+      const playerRect = { x: player.x, y: player.y, width: player.width, height: player.height }
+      
+      // Check obstacle collisions
+      levelObjects.forEach(obj => {
+        if (obj.type === 'scissors' || obj.type === 'stapler' || obj.type === 'paperball') {
+          const objRect = { x: obj.x, y: obj.y, width: obj.width, height: obj.height }
+          if (checkCollision(playerRect, objRect)) {
+            setLives(prev => {
+              const newLives = prev - 1
+              if (newLives <= 0) {
+                setGameState('gameOver')
+              }
+              return newLives
+            })
+            // Reset player position
+            setPlayer(prev => ({ ...prev, x: 100, y: 350 }))
+          }
+        }
+      })
+
+      // Check homework projectile collisions
+      homeworkProjectiles.forEach(hw => {
+        const hwRect = { x: hw.x, y: hw.y, width: hw.width, height: hw.height }
+        if (checkCollision(playerRect, hwRect)) {
+          setLives(prev => {
+            const newLives = prev - 1
+            if (newLives <= 0) {
+              setGameState('gameOver')
+            }
+            return newLives
+          })
+          // Remove the homework that hit
+          setHomeworkProjectiles(prev => prev.filter(p => p !== hw))
+        }
+      })
+
+      // Check level completion
+      if (player.x > 1000) {
+        if (currentLevel < LEVELS.length - 1) {
+          setCurrentLevel(prev => prev + 1)
+          setPlayer({ x: 100, y: 350, width: 30, height: 8, vy: 0, onGround: true })
+          setScore(prev => prev + 1000)
+          setGameState('levelComplete')
+        } else {
+          setGameState('victory')
+        }
+      }
+    }, 16) // ~60 FPS
+
+    return () => clearInterval(gameLoop)
+  }, [gameState, keys, player, levelObjects, homeworkProjectiles, currentLevel, level, checkCollision])
+
+  // Render game
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    // Clear canvas
+    ctx.fillStyle = level?.background || '#87CEEB'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // Draw classroom floor
+    ctx.fillStyle = '#8B4513'
+    ctx.fillRect(-camera.x, 380, 1400, 20)
+
+    // Draw classroom walls
+    ctx.fillStyle = '#F5F5DC'
+    ctx.fillRect(-camera.x, 0, 1400, 50)
+    ctx.fillRect(-camera.x, 350, 1400, 30)
+
+    // Draw finish line
+    ctx.fillStyle = '#00FF00'
+    ctx.fillRect(1000 - camera.x, 300, 10, 80)
+    ctx.fillStyle = '#000'
+    ctx.font = '16px Inter'
+    ctx.fillText('EXIT', 970 - camera.x, 295)
+
+    // Draw obstacles and enemies
+    levelObjects.forEach(obj => {
+      const x = obj.x - camera.x
+      const y = obj.y
+
+      switch (obj.type) {
+        case 'eraser':
+          ctx.fillStyle = '#FF69B4'
+          ctx.fillRect(x, y, obj.width, obj.height)
+          break
+        case 'ruler':
+          ctx.fillStyle = '#FFD700'
+          ctx.fillRect(x, y, obj.width, obj.height)
+          break
+        case 'scissors':
+          ctx.fillStyle = '#C0C0C0'
+          ctx.fillRect(x, y, obj.width, obj.height)
+          // Draw scissor blades
+          ctx.fillStyle = '#FF0000'
+          ctx.fillRect(x + 5, y + 5, 15, 5)
+          ctx.fillRect(x + 25, y + 5, 15, 5)
+          break
+        case 'stapler':
+          ctx.fillStyle = '#000000'
+          ctx.fillRect(x, y, obj.width, obj.height)
+          break
+        case 'sharpener':
+          ctx.fillStyle = '#8B4513'
+          ctx.fillRect(x, y, obj.width, obj.height)
+          break
+        case 'paperball':
+          ctx.fillStyle = '#FFFFFF'
+          ctx.beginPath()
+          ctx.arc(x + obj.width/2, y + obj.height/2, obj.width/2, 0, Math.PI * 2)
+          ctx.fill()
+          break
+        case 'teacher':
+          // Draw teacher boss
+          ctx.fillStyle = '#8B4513' // Brown for body
+          ctx.fillRect(x, y + 40, obj.width, obj.height - 40)
+          // Head
+          ctx.fillStyle = '#FFDBAC'
+          ctx.beginPath()
+          ctx.arc(x + obj.width/2, y + 20, 20, 0, Math.PI * 2)
+          ctx.fill()
+          // Angry eyes
+          ctx.fillStyle = '#FF0000'
+          ctx.fillRect(x + 25, y + 15, 8, 8)
+          ctx.fillRect(x + 45, y + 15, 8, 8)
+          // Health bar
+          if (obj.health) {
+            ctx.fillStyle = '#FF0000'
+            ctx.fillRect(x, y - 10, obj.width, 5)
+            ctx.fillStyle = '#00FF00'
+            ctx.fillRect(x, y - 10, (obj.width * obj.health) / 5, 5)
+          }
+          break
+      }
+    })
+
+    // Draw homework projectiles
+    homeworkProjectiles.forEach(hw => {
+      const x = hw.x - camera.x
+      const y = hw.y
+      ctx.fillStyle = '#FFFFFF'
+      ctx.fillRect(x, y, hw.width, hw.height)
+      ctx.fillStyle = '#000'
+      ctx.font = '10px Inter'
+      ctx.fillText('HW', x + 2, y + 12)
+    })
+
+    // Draw player (pencil)
+    const playerX = player.x - camera.x
+    const playerY = player.y
+
+    // Pencil body (yellow)
+    ctx.fillStyle = '#FFD700'
+    ctx.fillRect(playerX, playerY, player.width - 5, player.height)
+    
+    // Pencil tip (gray)
+    ctx.fillStyle = '#808080'
+    ctx.fillRect(playerX + player.width - 5, playerY + 2, 5, player.height - 4)
+    
+    // Eraser (pink)
+    ctx.fillStyle = '#FF69B4'
+    ctx.fillRect(playerX - 3, playerY + 1, 3, player.height - 2)
+
+  }, [player, camera, levelObjects, homeworkProjectiles, level])
+
+  const startGame = () => {
+    setGameState('playing')
+    setCurrentLevel(0)
+    setScore(0)
+    setLives(3)
+    setPlayer({ x: 100, y: 350, width: 30, height: 8, vy: 0, onGround: true })
+    setCamera({ x: 0 })
+  }
+
+  const nextLevel = () => {
+    setGameState('playing')
+    setPlayer({ x: 100, y: 350, width: 30, height: 8, vy: 0, onGround: true })
+    setCamera({ x: 0 })
+  }
+
+  const restartGame = () => {
+    startGame()
+  }
+
+  if (gameState === 'menu') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-blue-50 to-blue-100">
+        <Card className="p-8 text-center max-w-md">
+          <h1 className="text-4xl font-bold text-blue-600 mb-4">🖊️ Pencil Escape</h1>
+          <p className="text-gray-600 mb-6">
+            You're a pencil that jumped out of someone's hand! Navigate through classroom obstacles, 
+            avoid dangerous scissors and staplers, and escape each level. Watch out for the angry teacher boss!
+          </p>
+          <div className="mb-4">
+            <p className="text-sm text-gray-500 mb-2">Controls:</p>
+            <p className="text-xs text-gray-400">← → Arrow keys to move</p>
+            <p className="text-xs text-gray-400">↑ Arrow or Space to jump</p>
+          </div>
+          <Button onClick={startGame} className="w-full">
+            Start Adventure
+          </Button>
+        </Card>
+      </div>
+    )
+  }
+
+  if (gameState === 'levelComplete') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-green-50 to-green-100">
+        <Card className="p-8 text-center max-w-md">
+          <h2 className="text-3xl font-bold text-green-600 mb-4">Level Complete! 🎉</h2>
+          <p className="text-gray-600 mb-4">
+            Great job escaping {level.name}!
+          </p>
+          <p className="text-lg font-semibold mb-6">Score: {score}</p>
+          <Button onClick={nextLevel} className="w-full">
+            Next Level
+          </Button>
+        </Card>
+      </div>
+    )
+  }
+
+  if (gameState === 'victory') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-yellow-50 to-yellow-100">
+        <Card className="p-8 text-center max-w-md">
+          <h2 className="text-4xl font-bold text-yellow-600 mb-4">Victory! 🏆</h2>
+          <p className="text-gray-600 mb-4">
+            Congratulations! You've escaped all the classroom levels and defeated the teacher boss!
+          </p>
+          <p className="text-xl font-bold mb-6">Final Score: {score}</p>
+          <Button onClick={restartGame} className="w-full">
+            Play Again
+          </Button>
+        </Card>
+      </div>
+    )
+  }
+
+  if (gameState === 'gameOver') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-red-50 to-red-100">
+        <Card className="p-8 text-center max-w-md">
+          <h2 className="text-3xl font-bold text-red-600 mb-4">Game Over 💥</h2>
+          <p className="text-gray-600 mb-4">
+            The classroom obstacles got you! Try again and be more careful.
+          </p>
+          <p className="text-lg font-semibold mb-6">Score: {score}</p>
+          <Button onClick={restartGame} className="w-full">
+            Try Again
+          </Button>
+        </Card>
+      </div>
+    )
+  }
 
   return (
-    <div className="relative w-full h-screen">
-      <div ref={mountRef} className="w-full h-full" />
-      
-      {/* Game UI Overlay */}
-      <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-10">
-        <div className="bg-black/50 backdrop-blur-sm rounded-lg p-3 text-white">
-          <div className="text-sm space-y-1">
-            <div>Time: {gameTime.toFixed(1)}s</div>
-            <div>Score: {score}</div>
-            {isJumping && <div className="text-yellow-400">Jumping!</div>}
-          </div>
+    <div className="min-h-screen bg-gray-900 flex flex-col">
+      {/* Game UI */}
+      <div className="bg-gray-800 text-white p-4 flex justify-between items-center">
+        <div className="flex gap-6">
+          <span className="font-semibold">Level: {currentLevel + 1} - {level.name}</span>
+          <span>Lives: {'❤️'.repeat(lives)}</span>
+          <span>Score: {score}</span>
         </div>
-        
-        <Button
-          onClick={onPause}
-          variant="secondary"
-          size="sm"
-          className="bg-black/50 backdrop-blur-sm border-0 text-white hover:bg-black/70"
-        >
-          <Pause className="w-4 h-4" />
-        </Button>
+        <div className="text-sm text-gray-300">
+          Use ← → arrows to move, ↑ to jump
+        </div>
       </div>
-      
-      {/* Controls hint */}
-      <div className="absolute bottom-4 left-4 bg-black/50 backdrop-blur-sm rounded-lg p-3 text-white text-sm">
-        <div>WASD/Arrows: Move</div>
-        <div>SPACE: Jump</div>
-        <div>Goal: Reach the door!</div>
+
+      {/* Game Canvas */}
+      <div className="flex-1 flex items-center justify-center bg-gray-100">
+        <canvas
+          ref={canvasRef}
+          width={800}
+          height={400}
+          className="border-2 border-gray-300 bg-sky-200"
+        />
       </div>
     </div>
   )
 }
-
-export default GameCanvas
